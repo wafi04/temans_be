@@ -12,15 +12,27 @@ use Illuminate\Support\Facades\Log;
 
 class ProductsController extends Controller
 {
-    public function index(Request $request)
-    {
-        $products = Product::with([
+   public function index(Request $request)
+{
+    $user = auth()->user();
+
+    $products = Product::with([
         'variants' => function ($query) {
             $query->with('inventories');
         },
         'category',
         'seller'
     ])
+    ->when($user->role === 'admin', function ($query) use ($user) {
+        // Admin sees their own products
+        $query->where('seller_id', $user->id);
+    })
+    ->when($user->role === 'user', function ($query) use ($user) {
+        // User sees products sold by admin
+        $query->whereHas('seller', function ($subQuery) {
+            $subQuery->where('role', 'admin');
+        });
+    })
     ->when($request->search, function ($query) use ($request) {
         $query->where('name', 'like', '%' . $request->search . '%');
     })
@@ -33,7 +45,7 @@ class ProductsController extends Controller
         'current_page' => $products->currentPage(),
         'last_page' => $products->lastPage()
     ]);
-    }
+}
 
     public function show($id)
     {

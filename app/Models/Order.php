@@ -12,7 +12,9 @@ class Order extends Model
     public $incrementing = false; // Disable auto-increment
     protected $keyType = 'string'; // Set primary key type to string
     protected $fillable = [
-        'user_id', 
+        'user_id',
+        'bank_name',
+        'virtual_account', 
         'status', 
         'total_amount', 
         'shipping_address', 
@@ -112,9 +114,9 @@ class Order extends Model
     }
 
     // Method untuk checkout
-   public function checkout($shippingAddress, $paymentMethod)
+   public function checkout($shippingAddress, $paymentMethod,$bankName,$virtualAccount)
     {
-        return DB::transaction(function () use ($shippingAddress, $paymentMethod) {
+        return DB::transaction(function () use ($shippingAddress, $paymentMethod,$bankName,$virtualAccount) {
             // Validate cart is not empty
             if ($this->orderItems()->count() === 0) {
                 throw new \Exception("Cannot checkout an empty cart");
@@ -139,6 +141,8 @@ class Order extends Model
                 'status' => 'pending',
                 'shipping_address' => $shippingAddress,
                 'payment_method' => $paymentMethod,
+                'bank_name'  => $bankName,
+                'virtual_account'  => $virtualAccount,
                 'checkout_at' => now()
             ]);
             $order = $this->fresh(['orderItems.productVariant.product']);

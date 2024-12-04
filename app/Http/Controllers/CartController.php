@@ -125,7 +125,9 @@ public function addToCart(Request $request)
     {
         $validated = $request->validate([
             'shipping_address' => 'required|string',
-            'payment_method' => 'required|string'
+            'payment_method' => 'required|string',
+            'bank_name'  =>  'required|string',
+            'virtual_account'  => 'required|string'
         ]);
 
         $user = auth()->user();
@@ -138,7 +140,9 @@ public function addToCart(Request $request)
         try {
             $order = $cart->checkout(
                 $validated['shipping_address'], 
-                $validated['payment_method']
+                $validated['payment_method'],
+                $validated['bank_name'],
+                $validated['virtual_account']
             );
             $this->sellerNotificationService->notifyNewOrder($order);
 

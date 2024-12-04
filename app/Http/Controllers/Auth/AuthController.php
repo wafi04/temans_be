@@ -8,6 +8,7 @@ use Illuminate\Auth\Events\Registered;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rules;
 use Illuminate\Validation\ValidationException;
 use Laravel\Sanctum\PersonalAccessToken;
@@ -69,60 +70,86 @@ class AuthController extends Controller
     /**
      * Handle an incoming authentication request.
      */
-    public function login(Request $request)
-    {
-        try {
-            $request->validate([
-                'email' => ['required', 'string', 'email'],
-                'password' => ['required', 'string'],
-            ]);
+ public function login(Request $request)
+{
+    try {
+        // Validasi input
+        $validator = Validator::make($request->all(), [
+            'email' => [
+                'required', 
+                'string', 
+                'email',
+                'exists:users,email'  // Pastikan email ada di database
+            ],
+            'password' => [
+                'required', 
+                'string', 
+                'min:6'  // Contoh panjang minimal password
+            ]
+        ], [
+            // Custom error messages
+            'email.required' => 'Email tidak boleh kosong.',
+            'email.email' => 'Format email tidak valid.',
+            'email.exists' => 'Email tidak terdaftar.',
+            'password.required' => 'Password tidak boleh kosong.',
+            'password.min' => 'Password minimal 6 karakter.'
+        ]);
 
-            if (!Auth::attempt($request->only('email', 'password'))) {
-                throw ValidationException::withMessages([
-                    'email' => ['The provided credentials are incorrect.'],
-                ]);
-            }
-
-            $user = $request->user();
-            $token = $user->createToken('auth-token')->plainTextToken;
-
-             $response = response()->json([
-                'status' => true,
-                'message' => 'Login successful',
-                'data' => [
-                    'user' => $user,
-                    'token'  => $token
-                ]
-            ]);
-
-            // Tambahkan token ke cookie yang aman
-          $response->cookie(
-                'token',         
-                $token,          
-                60 * 24 * 30,    // 30 hari
-                '/',            
-                null,           
-                true,           // secure (HTTPS only)
-                true,           // httpOnly
-                false,          
-                'Strict'        
-            );
-            return $response;
-
-        } catch (ValidationException $e) {
+        // Jika validasi gagal
+        if ($validator->fails()) {
             return response()->json([
                 'status' => false,
-                'message' => 'Authentication failed',
-                'errors' => $e->errors()
+                'message' => 'Validasi gagal',
+                'errors' => $validator->errors()
             ], 422);
-        } catch (\Exception $e) {
+        }
+
+        // Coba autentikasi
+        if (!Auth::attempt($request->only('email', 'password'))) {
             return response()->json([
                 'status' => false,
-                'message' => 'Login failed',
-                'error' => $e->getMessage()
-            ], 500);
+                'message' => 'Login gagal',
+                'errors' => [
+                    'email' => ['Email atau password salah']
+                ]
+            ], 401);
         }
+
+        $user = $request->user();
+        $token = $user->createToken('auth-token')->plainTextToken;
+
+        $response = response()->json([
+            'status' => true,
+            'message' => 'Login berhasil',
+            'data' => [
+                'user' => $user,
+                'token' => $token
+            ]
+        ]);
+
+        // Tambahkan token ke cookie yang aman
+        $response->cookie(
+            'token',
+            $token,
+            60 * 24 * 30,    // 30 hari
+            '/',
+            null,
+            true,   // secure (HTTPS only)
+            true,   // httpOnly
+            false,
+            'Strict'
+        );
+
+        return $response;
+
+    } catch (\Exception $e) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Terjadi kesalahan',
+            'error' => $e->getMessage()
+        ], 500);
     }
+}
 
     /**
      * Destroy an authenticated session.
