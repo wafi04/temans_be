@@ -2,49 +2,127 @@
 
 namespace App\Http\Controllers;
 
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use App\Models\Product;
 use App\Models\Inventory;
 use App\Models\ProductVariant;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 class ProductsController extends Controller
 {
-   public function index(Request $request)
+   public function index(Request $request) 
 {
     $user = auth()->user();
+$query = "
+    SELECT 
+        p.id, 
+        p.name, 
+        p.description, 
+        p.seller_id, 
+        p.category_id, 
+        p.created_at,
+        p.updated_at
+    FROM products p
+    WHERE 1=1
+";
 
-    $products = Product::with([
-        'variants' => function ($query) {
-            $query->with('inventories');
-        },
-        'category',
-        'seller'
-    ])
-    ->when($user->role === 'admin', function ($query) use ($user) {
-        // Admin sees their own products
-        $query->where('seller_id', $user->id);
-    })
-    ->when($user->role === 'user', function ($query) use ($user) {
-        // User sees products sold by admin
-        $query->whereHas('seller', function ($subQuery) {
-            $subQuery->where('role', 'admin');
-        });
-    })
-    ->when($request->search, function ($query) use ($request) {
-        $query->where('name', 'like', '%' . $request->search . '%');
-    })
-    ->orderBy('created_at', 'desc')
-    ->paginate($request->input('per_page', 15));
+$params = [];
 
+// Filter berdasarkan role
+if ($user->role === 'admin') {
+    $query .= " AND p.seller_id = ?";
+    $params[] = $user->id;
+} elseif ($user->role === 'user') {
+    $query .= " AND EXISTS (
+        SELECT 1 FROM users 
+        WHERE users.id = p.seller_id 
+        AND users.role = 'admin'
+    )";
+}
+
+// Filter search
+if ($request->search) {
+    $query .= " AND p.name LIKE ?";
+    $params[] = '%' . $request->search . '%';
+}
+
+$query .= " ORDER BY p.created_at DESC";
+
+try {
+    $products = DB::select($query, $params);
+    
+    foreach ($products as &$product) {
+        // Ambil category lengkap
+        $category = DB::selectOne("
+            SELECT 
+                id, 
+                name, 
+                description
+            FROM categories 
+            WHERE id = ?
+        ", [$product->category_id]);
+        
+        // Ambil seller lengkap
+        $seller = DB::selectOne("
+            SELECT 
+                id, 
+                name, 
+                email,
+                role
+            FROM users 
+            WHERE id = ?
+        ", [$product->seller_id]);
+        
+        // Ambil semua variants untuk produk
+        $variants = DB::select("
+            SELECT 
+                pv.id,
+                pv.product_id,
+                pv.color,
+                pv.image,
+                pv.price,
+                pv.sku
+            FROM product_variants pv
+            WHERE pv.product_id = ?
+        ", [$product->id]);
+        
+        // Untuk setiap variant, ambil inventoriesnya
+        foreach ($variants as &$variant) {
+            $inventories = DB::select("
+                SELECT 
+                    id,
+                    product_variant_id,
+                    size,
+                    quantity
+                FROM inventories
+                WHERE product_variant_id = ?
+            ", [$variant->id]);
+            
+            $variant->inventories = $inventories;
+        }
+        
+        // Tambahkan category, seller, dan variants sebagai objek
+        $product->category = $category;
+        $product->seller = $seller;
+        $product->variants = $variants;
+    }
+    
     return response()->json([
-        'data' => $products->items(),
-        'total' => $products->total(),
-        'current_page' => $products->currentPage(),
-        'last_page' => $products->lastPage()
+        'status' => 'success',
+        'data' => $products
     ]);
+    
+} catch (\Exception $e) {
+    return response()->json([
+        'status' => 'error',
+        'message' => 'Failed to fetch products',
+        'error' => $e->getMessage()
+    ], 500);
+}
 }
 
     public function show($id)
@@ -57,21 +135,80 @@ class ProductsController extends Controller
 
         return response()->json($product);
     }
+public function createProduct(Request $request)
+{
+    try {
+       
+        // Persiapkan query insert
+        $query = "
+            INSERT INTO products (
+                id,
+                name, 
+                description, 
+                seller_id, 
+                category_id, 
+                created_at, 
+                updated_at
+            ) VALUES (
+                :id,
+                :name, 
+                :description, 
+                :seller_id, 
+                :category_id, 
+                :created_at, 
+                :updated_at
+            )
+        ";
 
-    public function createProduct(Request $request)
-    {
-        $product = Product::create([
+        // Siapkan parameter
+        $params = [
+            'id'  =>  Str::random(20),
             'name' => $request->name,
-            'description' => $request->description,
+            'description' => $request->description ?? null,
             'seller_id' => $request->seller_id,
-            'category_id' => $request->category_id
-        ]);
+            'category_id' => $request->category_id,
+            'created_at' => now(),
+            'updated_at' => now()
+        ];
+
+        // Eksekusi query dan dapatkan ID
+        DB::beginTransaction();
+        
+        DB::insert($query, $params);
+        $productId = DB::getPdo()->lastInsertId();
+
+        // Ambil produk yang baru dibuat
+        $product = DB::selectOne("
+            SELECT 
+                id, 
+                name, 
+                description, 
+                seller_id, 
+                category_id, 
+                created_at, 
+                updated_at 
+            FROM products 
+            WHERE id = ?
+        ", [$productId]);
+
+        DB::commit();
 
         return response()->json([
+            'status' => 'success',
             'message' => 'Product created successfully', 
             'data' => $product
-        ]);
+        ], 201);
+
+    } catch (\Exception $e) {
+        DB::rollBack();
+        
+        return response()->json([
+            'status' => 'error',
+            'message' => 'Failed to create product',
+            'error' => $e->getMessage()
+        ], 500);
     }
+}
 
     protected function generateUniqueSku(): string
     {
@@ -85,194 +222,501 @@ class ProductsController extends Controller
 
         return $sku;
     }   
+public function createVariantsAndInventory(Request $request) 
+{
+    // Validasi input
+    $validator = Validator::make($request->all(), [
+        'product_id' => 'required|exists:products,id',
+        'color' => 'required|string|max:100',
+        'image' => 'nullable|string|max:255',
+        'price' => 'required|numeric|min:0',
+        'inventory' => 'required|array|min:1',
+        'inventory.*.size' => 'required|string|max:50',
+        'inventory.*.quantity' => 'required|integer|min:0'
+    ]);
 
-    public function createVariantsAndInventory(Request $request) 
-    {
-        $validatedData = $request->validate([
-            'product_id' => 'required|exists:products,id',
-            'color' => 'required|string',
-            'image' => 'nullable|string',
-            'price' => 'required|numeric|min:0',
-            'inventory' => 'required|array',
-            'inventory.*.size' => 'required|string',
-            'inventory.*.quantity' => 'required|integer|min:0'
-        ]);
-
-        return DB::transaction(function () use ($validatedData) {
-            try {
-                // Generate SKU on the server-side
-                $sku = $this->generateUniqueSku();
-
-                // Create variant
-                $variant = ProductVariant::create([
-                    'product_id' => $validatedData['product_id'],
-                    'color' => $validatedData['color'],
-                    'image' => $validatedData['image'] ?? null,
-                    'price' => $validatedData['price'],
-                    'sku' => $sku
-                ]);
-
-                // Create inventories for the variant
-                $inventoryItems = [];
-                foreach ($validatedData['inventory'] as $inventoryData) {
-                    $inventoryItem = Inventory::create([
-                        'product_variant_id' => $variant->id,
-                        'size' => $inventoryData['size'],
-                        'quantity' => $inventoryData['quantity']
-                    ]);
-                    $inventoryItems[] = $inventoryItem;
-                }
-
-                // Refresh the variant to load inventories
-                $variant->load('inventories');
-
-                return response()->json([
-                    'message' => 'Variant and Inventory created successfully',
-                    'variant' => $variant,
-                ], 201);
-
-            } catch (\Exception $e) {
-                // Log the full error for debugging
-                Log::error('Variant Creation Error', [
-                    'message' => $e->getMessage(),
-                    'trace' => $e->getTraceAsString(),
-                    'data' => $validatedData
-                ]);
-
-                return response()->json([
-                    'message' => 'Error creating variant',
-                    'error' => config('app.debug') ? $e->getMessage() : 'An unexpected error occurred'
-                ], 500);
-            }
-        });
+    // Cek validasi
+    if ($validator->fails()) {
+        return response()->json([
+            'status' => 'error',
+            'errors' => $validator->errors()
+        ], 400);
     }
 
-    public function updateProduct(Request $request, $productId)
-    {
-        $product = Product::findOrFail($productId);
-        $product->update([
-            'name' => $request->name,
-            'description' => $request->description,
-            'category_id' => $request->category_id
+    try {
+        DB::beginTransaction();
+
+        // Generate unique SKU
+        $sku = $this->generateUniqueSku();
+
+        // Generate UUID untuk variant
+        $variantId = Str::uuid()->toString();
+
+        // Persiapkan query untuk insert variant
+        $variantQuery = "
+            INSERT INTO product_variants (
+                id,
+                product_id, 
+                color, 
+                image, 
+                price, 
+                sku, 
+                created_at, 
+                updated_at
+            ) VALUES (
+                :id,
+                :product_id, 
+                :color, 
+                :image, 
+                :price, 
+                :sku, 
+                :created_at, 
+                :updated_at
+            )
+        ";
+
+        // Siapkan parameter variant
+        $variantParams = [
+            'id' => $variantId,
+            'product_id' => $request->product_id,
+            'color' => $request->color,
+            'image' => $request->image ?? null,
+            'price' => $request->price,
+            'sku' => $sku,
+            'created_at' => now(),
+            'updated_at' => now()
+        ];
+
+        // Insert variant
+        DB::insert($variantQuery, $variantParams);
+
+        // Persiapkan query untuk insert inventory
+        $inventoryQuery = "
+            INSERT INTO inventories (
+                product_variant_id, 
+                size, 
+                quantity, 
+                created_at, 
+                updated_at
+            ) VALUES (
+                :product_variant_id, 
+                :size, 
+                :quantity, 
+                :created_at, 
+                :updated_at
+            )
+        ";
+
+        // Simpan inventories
+        $inventoryItems = [];
+        foreach ($request->inventory as $inventoryData) {
+            $inventoryParams = [
+                'product_variant_id' => $variantId,
+                'size' => $inventoryData['size'],
+                'quantity' => $inventoryData['quantity'],
+                'created_at' => now(),
+                'updated_at' => now()
+            ];
+
+            DB::insert($inventoryQuery, $inventoryParams);
+            $inventoryId = DB::getPdo()->lastInsertId();
+
+            // Ambil data inventory yang baru dibuat
+            $inventoryItem = DB::selectOne("
+                SELECT * FROM inventories WHERE id = ?
+            ", [$inventoryId]);
+
+            $inventoryItems[] = $inventoryItem;
+        }
+
+        // Ambil variant yang baru dibuat dengan inventories
+        $variant = DB::selectOne("
+            SELECT 
+                pv.id, 
+                pv.product_id, 
+                pv.color, 
+                pv.image, 
+                pv.price, 
+                pv.sku,
+                pv.created_at,
+                pv.updated_at,
+                JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'id', i.id,
+                        'size', i.size,
+                        'quantity', i.quantity
+                    )
+                ) as inventories
+            FROM product_variants pv
+            LEFT JOIN inventories i ON pv.id = i.product_variant_id
+            WHERE pv.id = ?
+            GROUP BY 
+                pv.id, 
+                pv.product_id, 
+                pv.color, 
+                pv.image, 
+                pv.price, 
+                pv.sku,
+                pv.created_at,
+                pv.updated_at
+        ", [$variantId]);
+
+        // Convert inventories JSON to array
+        $variant->inventories = $variant->inventories ? json_decode($variant->inventories, true) : [];
+
+        DB::commit();
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Variant and Inventory created successfully',
+            'variant' => $variant
+        ], 201);
+
+    } catch (\Exception $e) {
+        DB::rollBack();
+
+        // Log error untuk debugging
+        Log::error('Variant Creation Error', [
+            'message' => $e->getMessage(),
+            'trace' => $e->getTraceAsString(),
+            'data' => $request->all()
         ]);
 
         return response()->json([
-            'message' => 'Product updated successfully', 
-            'product' => $product
-        ]);
+            'status' => 'error',
+            'message' => 'Error creating variant',
+            'error' => config('app.debug') ? $e->getMessage() : 'An unexpected error occurred'
+        ], 500);
     }
-public function updateVariantsAndInventory(Request $request, $variantId)
+}
+    public function updateProduct(Request $request, $productId)
 {
     try {
-        return DB::transaction(function () use ($request, $variantId) {
-            // Validate that variant data exists
-            if (!$request->has('color') || !$request->has('price')) {
-                return response()->json([
-                    'status' => false,
-                    'message' => 'Missing required variant fields'
-                ], 400);
-            }
+        // Cek apakah produk ada
+        $existingProduct = DB::selectOne("
+            SELECT id FROM products WHERE id = ?
+        ", [$productId]);
 
-            // Update or create the variant
-            $variant = ProductVariant::updateOrCreate(
-                ['id' => $variantId],
-                [
-                    'color' => $request->color,
-                    'image' => $request->image ?? null,
-                    'price' => $request->price,
-                    'sku' => $request->sku ?? $this->generateUniqueSku()
-                ]
-            );
-
-            // Handle inventories if they exist
-            if ($request->has('inventory') && is_array($request->inventory)) {
-                foreach ($request->inventory as $inventoryData) {
-                    // Validate required inventory fields
-                    if (!isset($inventoryData['size']) || !isset($inventoryData['quantity'])) {
-                        throw new \InvalidArgumentException('Missing required inventory fields');
-                    }
-
-                    // Update or create inventory
-                    Inventory::updateOrCreate(
-                        [
-                            'id' => $inventoryData['id'] ?? null,
-                            'product_variant_id' => $variant->id
-                        ],
-                        [
-                            'size' => $inventoryData['size'],
-                            'quantity' => max(0, intval($inventoryData['quantity'])) // Ensure non-negative quantity
-                        ]
-                    );
-                }
-            }
-
+        if (!$existingProduct) {
             return response()->json([
-                'status' => true,
-                'message' => 'Variant and Inventory updated successfully',
-                'data' => [
-                    'variant_id' => $variant->id,
-                    'color' => $variant->color,
-                    'price' => $variant->price,
-                    'sku' => $variant->sku
-                ]
-            ], 200);
-        });
-    } catch (\InvalidArgumentException $e) {
+                'status' => 'error',
+                'message' => 'Product not found'
+            ], 404);
+        }
+
+        $query = "
+            UPDATE products 
+            SET 
+                name = :name, 
+                description = :description, 
+                category_id = :category_id, 
+                updated_at = :updated_at
+            WHERE id = :product_id
+        ";
+
+        // Siapkan parameter
+        $params = [
+            'name' => $request->name,
+            'description' => $request->description ?? null,
+            'category_id' => $request->category_id,
+            'updated_at' => now(),
+            'product_id' => $productId
+        ];
+
+        // Eksekusi update
+        DB::beginTransaction();
+        
+        DB::update($query, $params);
+
+        // Ambil produk yang sudah diupdate
+        $updatedProduct = DB::selectOne("
+            SELECT 
+                p.id, 
+                p.name, 
+                p.description, 
+                p.category_id, 
+                c.name AS category_name,
+                p.seller_id,
+                s.name AS seller_name,
+                p.created_at, 
+                p.updated_at 
+            FROM products p
+            LEFT JOIN categories c ON p.category_id = c.id
+            LEFT JOIN users s ON p.seller_id = s.id
+            WHERE p.id = ?
+        ", [$productId]);
+
+        DB::commit();
+
         return response()->json([
-            'status' => false,
-            'message' => $e->getMessage()
-        ], 400);
+            'status' => 'success',
+            'message' => 'Product updated successfully', 
+            'data' => $updatedProduct
+        ]);
+
     } catch (\Exception $e) {
+        DB::rollBack();
+        
+        return response()->json([
+            'status' => 'error',
+            'message' => 'Failed to update product',
+            'error' => $e->getMessage()
+        ], 500);
+    }
+}
+public function updateVariantsAndInventory(Request $request, $variantId)
+{
+    // Validasi input
+    $validator = Validator::make($request->all(), [
+        'color' => 'sometimes|required|string|max:100',
+        'image' => 'nullable|string|max:255',
+        'price' => 'sometimes|required|numeric|min:0',
+        'inventory' => 'sometimes|array',
+        'inventory.*.size' => 'required_with:inventory|string|max:50',
+        'inventory.*.quantity' => 'required_with:inventory|integer|min:0'
+    ]);
+
+    // Cek validasi
+    if ($validator->fails()) {
         return response()->json([
             'status' => false,
-            'message' => 'An error occurred while updating variant and inventory'
+            'errors' => $validator->errors()
+        ], 400);
+    }
+
+    try {
+        DB::beginTransaction();
+
+        // Cek apakah variant exists
+        $variantExists = DB::selectOne("SELECT * FROM product_variants WHERE id = ?", [$variantId]);
+        
+        if (!$variantExists) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Variant not found'
+            ], 404);
+        }
+
+        // Persiapkan data update untuk variant
+        $updateData = [];
+        $updateParams = [];
+
+        // Bangun query update variant
+        $variantUpdateQuery = "UPDATE product_variants SET ";
+        
+        if ($request->has('color')) {
+            $updateData[] = "color = ?";
+            $updateParams[] = $request->color;
+        }
+
+        if ($request->has('image')) {
+            $updateData[] = "image = ?";
+            $updateParams[] = $request->image;
+        }
+
+        if ($request->has('price')) {
+            $updateData[] = "price = ?";
+            $updateParams[] = $request->price;
+        }
+
+        // Tambahkan updated_at
+        if (!empty($updateData)) {
+            $updateData[] = "updated_at = ?";
+            $updateParams[] = now();
+            
+            // Tambahkan parameter variant id
+            $updateParams[] = $variantId;
+
+            // Eksekusi update variant
+            $variantUpdateQuery .= implode(', ', $updateData) . " WHERE id = ?";
+            DB::update($variantUpdateQuery, $updateParams);
+        }
+
+        // Proses inventory
+        if ($request->has('inventory') && is_array($request->inventory)) {
+            // Hapus inventory yang ada
+            DB::delete("DELETE FROM inventories WHERE product_variant_id = ?", [$variantId]);
+
+            // Siapkan query insert inventory
+            $inventoryQuery = "
+                INSERT INTO inventories (
+                    product_variant_id, 
+                    size, 
+                    quantity, 
+                    created_at, 
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+            ";
+
+            // Proses setiap inventory
+            foreach ($request->inventory as $inventoryData) {
+                DB::insert($inventoryQuery, [
+                    $variantId,
+                    $inventoryData['size'],
+                    max(0, intval($inventoryData['quantity'])),
+                    now(),
+                    now()
+                ]);
+            }
+        }
+
+        // Ambil data variant yang diupdate
+        $updatedVariant = DB::selectOne("
+            SELECT 
+                pv.id, 
+                pv.color, 
+                pv.image, 
+                pv.price, 
+                pv.sku,
+                JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'id', i.id,
+                        'size', i.size,
+                        'quantity', i.quantity
+                    )
+                ) as inventories
+            FROM product_variants pv
+            LEFT JOIN inventories i ON pv.id = i.product_variant_id
+            WHERE pv.id = ?
+            GROUP BY 
+                pv.id, 
+                pv.color, 
+                pv.image, 
+                pv.price, 
+                pv.sku
+        ", [$variantId]);
+
+        // Convert inventories JSON to array
+        $updatedVariant->inventories = $updatedVariant->inventories 
+            ? json_decode($updatedVariant->inventories, true) 
+            : [];
+
+        DB::commit();
+
+        return response()->json([
+            'status' => true,
+            'message' => 'Variant and Inventory updated successfully',
+            'data' => [
+                'variant' => [
+                    'id' => $updatedVariant->id,
+                    'color' => $updatedVariant->color,
+                    'image' => $updatedVariant->image,
+                    'price' => $updatedVariant->price,
+                    'sku' => $updatedVariant->sku,
+                    'inventories' => $updatedVariant->inventories
+                ]
+            ]
+        ], 200);
+
+    } catch (\Exception $e) {
+        DB::rollBack();
+
+        // Log error untuk debugging
+        Log::error('Variant Update Error', [
+            'message' => $e->getMessage(),
+            'trace' => $e->getTraceAsString(),
+            'data' => $request->all()
+        ]);
+
+        return response()->json([
+            'status' => false,
+            'message' => 'An error occurred while updating variant and inventory',
+            'error' => config('app.debug') ? $e->getMessage() : null
         ], 500);
     }
 }
  public function deleteProduct($productId)
-    {
-        try {
-            return DB::transaction(function () use ($productId) {
-            $product = Product::with(['variants.inventories'])->findOrFail($productId);
-                                
-                // Delete the product
-                $product->delete();
+{
+    try {
+        DB::beginTransaction();
 
-                return response()->json([
-                    'status' => true,
-                    'message' => 'Product and all its variants and inventories deleted successfully'
-                ], 200);
-            });
-        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
+        // Cek apakah produk ada
+        $product = DB::selectOne("
+            SELECT id FROM products WHERE id = ?
+        ", [$productId]);
+
+        if (!$product) {
             return response()->json([
                 'status' => false,
                 'message' => 'Product not found'
             ], 404);
-        } catch (\Exception $e) {
-            Log::error('Error deleting product: ' . $e->getMessage());
-            return response()->json([
-                'status' => false,
-                'message' => 'An error occurred while deleting the product'
-            ], 500);
         }
+
+        // Hapus inventories terkait variants
+        DB::delete("
+            DELETE FROM inventories 
+            WHERE product_variant_id IN (
+                SELECT id FROM product_variants 
+                WHERE product_id = ?
+            )
+        ", [$productId]);
+
+        // Hapus variants terkait produk
+        DB::delete("
+            DELETE FROM product_variants 
+            WHERE product_id = ?
+        ", [$productId]);
+
+        // Hapus produk
+        DB::delete("
+            DELETE FROM products 
+            WHERE id = ?
+        ", [$productId]);
+
+        DB::commit();
+
+        return response()->json([
+            'status' => true,
+            'message' => 'Product and all its variants and inventories deleted successfully'
+        ], 200);
+
+    } catch (\Exception $e) {
+        DB::rollBack();
+        
+        // Log error untuk debugging
+        Log::error('Error deleting product: ' . $e->getMessage());
+
+        return response()->json([
+            'status' => false,
+            'message' => 'An error occurred while deleting the product',
+            'error' => $e->getMessage()
+        ], 500);
     }
+}
 public function deleteVariant($variantId)
     {
         try {
-            return DB::transaction(function () use ($variantId) {
-                $variant = ProductVariant::findOrFail($variantId);
-                
-                // Delete all related inventories
-                $variant->inventories()->delete();
-                
-                // Delete the variant
-                $variant->delete();
+            DB::beginTransaction();
 
-                return response()->json([
-                    'status' => true,
-                    'message' => 'Variant and all its inventories deleted successfully'
-                ], 200);
-            });
+        // Cek apakah variant exists
+        $variant = DB::selectOne("SELECT * FROM product_variants WHERE id = ?", [$variantId]);
+        
+        if (!$variant) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Variant not found'
+            ], 404);
+        }
+
+        // Hapus semua inventories terkait
+        $inventoryDeleteQuery = "DELETE FROM inventories WHERE product_variant_id = ?";
+        $inventoriesDeleted = DB::delete($inventoryDeleteQuery, [$variantId]);
+
+        // Hapus variant
+        $variantDeleteQuery = "DELETE FROM product_variants WHERE id = ?";
+        $variantDeleted = DB::delete($variantDeleteQuery, [$variantId]);
+
+        // Commit transaksi
+        DB::commit();
+
+        return response()->json([
+            'status' => true,
+            'message' => 'Variant and all its inventories deleted successfully',
+            'deleted' => [
+                'variant' => $variantDeleted,
+                'inventories' => $inventoriesDeleted
+            ]
+        ], 200);
         } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
             return response()->json([
                 'status' => false,

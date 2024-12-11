@@ -48,6 +48,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/checkout',[CartController::class,'checkout']);
         Route::post('/',[CartController::class,'addToCart']);
         Route::get('/orders', [CartController::class, 'getUserOrders']);
+        Route::get('/orders/seller', [CartController::class, 'getSellerOrders']);
     });
 
     Route::prefix('notifications')  ->   group(function()  {
