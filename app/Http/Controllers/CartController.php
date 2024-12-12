@@ -2,8 +2,6 @@
 namespace App\Http\Controllers;
 
 use App\Models\Order;
-use App\Models\OrderItem;
-use App\Models\ProductVariant;
 use App\Http\Services\SellerNotificationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -322,8 +320,6 @@ public function addToCart(Request $request)
             $validated['virtual_account']  ?? null,
             $cart->id
         ]);
-
-        // Ambil order yang baru diupdate
         $orderQuery = "
             SELECT o.*, 
             JSON_ARRAYAGG(
